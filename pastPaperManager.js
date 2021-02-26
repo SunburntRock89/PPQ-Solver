@@ -1,6 +1,20 @@
 const { get, post } = require("chainfetch");
 const cheerio = require("cheerio");
 const parsePDF = require("pdf-parse");
+const { createLogger, transports, format } = require("winston");
+
+const winston = createLogger({
+	level: "info",
+	transports: [
+		new transports.Console({
+			format: format.combine(
+				format.colorize(),
+				format.simple(),
+			),
+		}),
+	],
+});
+
 
 const subjects = {
 	biology: {
@@ -11,6 +25,16 @@ const subjects = {
 		legacy: {
 			view_args: 44,
 			view_path: "%2Fnode%2F13178",
+		},
+	},
+	chemistry: {
+		current: {
+			view_args: 468,
+			view_path: "/node/1973",
+		},
+		legacy: {
+			view_args: 469,
+			view_path: "/node/13180",
 		},
 	},
 	history: {
@@ -40,23 +64,29 @@ const subjects = {
 };
 
 
-const searchWebsiteForQuestion = async(site, question, current) => {
+const searchWebsiteForQuestion = async(site, question, current, subject, oldSubject) => {
 	let $ = cheerio.load(site);
 
 	let validPapers = $("a.pdf").find("span.file-title").toArray()
-		.filter(d => !d.children[0].data.includes("(MV18pt)") && !d.children[0].data.includes("MS"));
-
+		.filter(d =>
+			!d.children[0].data.includes("(MV18pt)") &&
+			!d.children[0].data.includes("MS"));
 	for (let i of validPapers) {
 		let paperName = i.children[0].data;
+
+		if (["das", "sas"].includes(subject) && oldSubject && !i.children[0].data.includes(oldSubject.toLowerCase())) {
+			continue;
+		}
+
 		let pdfURL = i.parent.attribs.href;
 		let series = String(i.next.next.next.next.children[0].children[0].data);
 
 		let pdf;
 		try {
 			pdf = await get(decodeURI(pdfURL));
-			console.log(`Searching ${current ? "Current" : "Legacy"} ${series}${paperName}`);
+			winston.debug(`Searching ${current ? "Current" : "Legacy"} ${series}${paperName}`);
 		} catch {
-			console.log(`Cannot search ${current ? "Current" : "Legacy"} ${series}${paperName}`);
+			winston.warn(`Cannot search ${current ? "Current" : "Legacy"} ${series}${paperName}`);
 			continue;
 		}
 
@@ -75,15 +105,16 @@ const searchWebsiteForQuestion = async(site, question, current) => {
 	}
 };
 
-const getMarkScheme = async(paperName, site) => {
+const getMarkScheme = async(paperName, site, series) => {
 	let $ = cheerio.load(site);
 
 	const allMarkSchemes = $("span.MS");
-	const thisMarkScheme = allMarkSchemes.find(ms => ms.parent.prev.prev.prev.prev.prev.next.children[0].data === paperName);
-	console.log(allMarkSchemes);
+	const markSchemesThisSeries = allMarkSchemes.toArray().filter(ms => ms.parent.parent.children[5].children[0].children[0].data.includes(series));
+	const thisMarkScheme = markSchemesThisSeries.find(ms => ms.parent.prev.prev.prev.prev.prev.next.children[0].data.toLowerCase().replace(/ /gm, "").includes(paperName.toLowerCase().replace(/ /gm, "")));
+	// console.log(allMarkSchemes[0].parent);
 
 	const thisMarkSchemeLink = thisMarkScheme.parent.parent.attribs.href;
-	console.log("Mark Scheme identified.");
+	winston.info("Mark Scheme identified.");
 
 	let pdf;
 	try {
@@ -101,9 +132,11 @@ const getMarkScheme = async(paperName, site) => {
 	};
 };
 
-module.exports.getAnswers = async(subject, level, question, pass = 1) => {
+module.exports.getAnswers = async(subject, level, question, pass = 1, originalSubject = null) => {
 	switch (level.toLowerCase()) {
 		case "gcse": {
+			winston.info(`Searching for ${level} ${subject} "${question}"`);
+
 			if (subject === "das") subject = "science-double-award";
 			if (subject === "sas") subject = "science-single-award";
 
@@ -131,7 +164,7 @@ module.exports.getAnswers = async(subject, level, question, pass = 1) => {
 					TE: "Trailers",
 				});
 
-			let theOne = await searchWebsiteForQuestion(markSchemesPage.body[4].data, question, true);
+			let theOne = await searchWebsiteForQuestion(markSchemesPage.body[4].data, question, true, subject, originalSubject);
 
 			// If it's current spec return what paper it is
 			if (!theOne) {
@@ -159,22 +192,22 @@ module.exports.getAnswers = async(subject, level, question, pass = 1) => {
 						TE: "Trailers",
 					});
 
-				theOne = await searchWebsiteForQuestion(markSchemesPage.body[4].data, question, false);
+				theOne = await searchWebsiteForQuestion(markSchemesPage.body[4].data, question, false, subject, originalSubject);
 				if (!theOne && ["biology", "chemistry", "physics"].includes(subject.toLowerCase())) {
 					switch (pass) {
-						case 1: return this.getAnswers("das", level, question, 2);
-						case 2: return this.getAnswers("sas", level, question, 3);
+						case 1: return this.getAnswers("das", level, question, 2, subject);
+						case 2: return this.getAnswers("sas", level, question, 3, subject);
 					}
 				}
 			}
 
 			if (!theOne) return null;
-			console.log(theOne.pdf);
+			winston.info(theOne.pdf);
 
 			// We know what paper it is, time to get the mark scheme answer.
 
-			const markScheme = await getMarkScheme(theOne.paperName, markSchemesPage.body[4].data);
-			console.log(markScheme.link);
+			const markScheme = await getMarkScheme(theOne.paperName, markSchemesPage.body[4].data, theOne.series);
+			winston.info(markScheme.link);
 
 			// // We need to find the question number
 			// const nearEnoughToPages = theOne.parsedPDF.text.split("Turn over");
